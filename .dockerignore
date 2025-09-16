@@ -1,0 +1,52 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+README-API.md
+*.md
+
+# Test files
+*_test.go
+**/*_test.go
+integration_test.go
+
+# Coverage files
+coverage.out
+coverage.html
+*.coverprofile
+
+# Build artifacts
+bin/
+*.test
+*.out
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Example/auxiliary files
+backend*.go
+mock_actions.go
+stats_server.go
+trigger_test_server.go
+analyze_logs.go
+start_backends.sh
+
+# Docker files
+Dockerfile*
+docker-compose*.yml

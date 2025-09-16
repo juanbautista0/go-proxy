@@ -1,0 +1,66 @@
+proxy:
+    port: 8080
+backends:
+    - name: web-servers
+      servers:
+        - url: http://localhost:3001
+          weight: 3
+          active: true
+          max_connections: 100
+          health_check_endpoint: /health
+        - url: http://localhost:3002
+          weight: 2
+          active: true
+          max_connections: 100
+          health_check_endpoint: /health
+      health_check: /health
+      balance_mode: adaptive_weighted
+      health_interval: 10s
+      timeout: 30s
+      retries: 3
+      min_servers: 1
+      max_servers: 10
+      circuit_breaker:
+        failure_threshold: 5
+        recovery_timeout: 30s
+        enabled: true
+triggers:
+    smart:
+        enabled: true
+        evaluation_interval: 5s
+        short_window: 30s
+        long_window: 5m0s
+        cooldown: 1m0s
+        stability_threshold: 0.4
+        scale_up_score: 0.45
+        scale_down_score: 0.15
+    traffic:
+        high_threshold: 50
+        low_threshold: 5
+        high_action: scale_up
+        low_action: scale_down
+    schedule:
+        - time: "09:00"
+          action: morning_scale
+        - time: "18:00"
+          action: evening_scale
+actions:
+    evening_scale:
+        url: http://localhost:8082/actions/evening_scale
+        method: POST
+    morning_scale:
+        url: http://localhost:8082/actions/morning_scale
+        method: POST
+    scale_down:
+        url: http://localhost:8082/actions/scale_down
+        method: POST
+    scale_up:
+        url: http://localhost:8082/actions/scale_up
+        method: POST
+
+security:
+    api_keys:
+        - "dev-key-456"
+        - "prod-key-789"
+    admin_api_keys:
+        - "super-admin-key-999"

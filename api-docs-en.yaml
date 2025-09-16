@@ -1,0 +1,520 @@
+openapi: 3.0.3
+info:
+  title: Go-Proxy Configuration API
+  description: |
+    REST API to manage Go-Proxy load balancer configuration.
+    
+    **Features:**
+    - Dynamic backend server management
+    - Automatic scaling actions
+    - API Key authentication
+    - Min/max limits validation
+    
+  version: 1.0.0
+  contact:
+    name: Go-Proxy Team
+    url: https://github.com/juanbautista0/go-proxy
+
+servers:
+  - url: http://localhost:8082
+    description: Local configuration server
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /config:
+    get:
+      summary: Get current configuration
+      description: Returns complete proxy configuration
+      tags:
+        - Configuration
+      security: []
+      responses:
+        '200':
+          description: Current configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Config'
+    
+    put:
+      summary: Update complete configuration
+      description: |
+        Replaces entire proxy configuration.
+        
+        **Note**: Proxy port cannot be modified for security reasons.
+      tags:
+        - Configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Config'
+      responses:
+        '200':
+          description: Configuration updated successfully
+        '400':
+          description: Invalid configuration
+        '401':
+          description: API Key required or invalid
+        '500':
+          description: Internal server error
+
+  /servers:
+    post:
+      summary: Add backend server
+      description: Adds a new server to specified backend
+      tags:
+        - Servers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddServerRequest'
+      responses:
+        '201':
+          description: Server added successfully
+        '400':
+          description: Maximum server limit reached or invalid data
+        '401':
+          description: API Key required or invalid
+        '404':
+          description: Backend not found
+        '500':
+          description: Internal server error
+    
+    put:
+      summary: Update existing server
+      description: Modifies configuration of existing server
+      tags:
+        - Servers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateServerRequest'
+      responses:
+        '200':
+          description: Server updated successfully
+        '400':
+          description: Invalid data
+        '401':
+          description: API Key required or invalid
+        '404':
+          description: Server not found
+        '500':
+          description: Internal server error
+    
+    delete:
+      summary: Remove backend server
+      description: Removes server from specified backend
+      tags:
+        - Servers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveServerRequest'
+      responses:
+        '200':
+          description: Server removed successfully
+        '400':
+          description: Minimum server limit reached
+        '401':
+          description: API Key required or invalid
+        '404':
+          description: Server not found
+        '500':
+          description: Internal server error
+
+  /security:
+    get:
+      summary: Get security configuration
+      description: Returns API keys (admin only)
+      tags:
+        - Security
+      security:
+        - AdminApiKeyAuth: []
+      responses:
+        '200':
+          description: Security configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityConfig'
+        '403':
+          description: Admin access required
+    
+    put:
+      summary: Update security configuration
+      description: Modifies API keys (admin only)
+      tags:
+        - Security
+      security:
+        - AdminApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SecurityConfig'
+      responses:
+        '200':
+          description: Security configuration updated
+        '400':
+          description: Invalid data
+        '403':
+          description: Admin access required
+        '500':
+          description: Internal server error
+
+  /actions/scale_up:
+    post:
+      summary: Scale up
+      description: Adds generic server to web-servers backend
+      tags:
+        - Actions
+      security: []
+      responses:
+        '200':
+          description: Scaling successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '400':
+          description: Maximum server limit reached
+        '500':
+          description: Internal server error
+
+  /actions/scale_down:
+    post:
+      summary: Scale down
+      description: Removes last server from web-servers backend
+      tags:
+        - Actions
+      security: []
+      responses:
+        '200':
+          description: Scaling successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '400':
+          description: Minimum server limit reached
+        '500':
+          description: Internal server error
+
+  /actions/morning_scale:
+    post:
+      summary: Morning scaling
+      description: Increases weight of all servers (+1)
+      tags:
+        - Actions
+      security: []
+      responses:
+        '200':
+          description: Morning scaling successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '500':
+          description: Internal server error
+
+  /actions/evening_scale:
+    post:
+      summary: Evening scaling
+      description: Decreases weight of all servers (-1, minimum 1)
+      tags:
+        - Actions
+      security: []
+      responses:
+        '200':
+          description: Evening scaling successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '500':
+          description: Internal server error
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-KEY
+      description: |
+        API Key for authentication. Contact administrator to get a valid key.
+    AdminApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-KEY
+      description: |
+        Admin API Key for administrative operations. Only administrators have access.
+
+  schemas:
+    Config:
+      type: object
+      properties:
+        proxy:
+          $ref: '#/components/schemas/ProxyConfig'
+        backends:
+          type: array
+          items:
+            $ref: '#/components/schemas/Backend'
+        triggers:
+          $ref: '#/components/schemas/TriggerConfig'
+        actions:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ActionConfig'
+        security:
+          $ref: '#/components/schemas/SecurityConfig'
+
+    ProxyConfig:
+      type: object
+      properties:
+        port:
+          type: integer
+          example: 8080
+          readOnly: true
+          description: "Proxy port (not modifiable via API)"
+
+    Backend:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "web-servers"
+        servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Server'
+        health_check:
+          type: string
+          example: "/health"
+        balance_mode:
+          type: string
+          enum: [adaptive_weighted, least_connections, response_time, consistent_hash, power_of_two, weighted_fair_queue]
+          example: "adaptive_weighted"
+        min_servers:
+          type: integer
+          minimum: 1
+          example: 1
+        max_servers:
+          type: integer
+          minimum: 1
+          example: 10
+        health_interval:
+          type: string
+          example: "10s"
+        timeout:
+          type: string
+          example: "30s"
+        retries:
+          type: integer
+          example: 3
+
+    Server:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          example: "http://localhost:3001"
+        weight:
+          type: integer
+          minimum: 1
+          example: 3
+        max_connections:
+          type: integer
+          minimum: 1
+          example: 100
+        health_check_endpoint:
+          type: string
+          example: "/health"
+        active:
+          type: boolean
+          example: true
+
+    SecurityConfig:
+      type: object
+      properties:
+        api_keys:
+          type: array
+          items:
+            type: string
+          example: ["dev-key-456", "prod-key-789"]
+          description: "Regular API keys for standard operations"
+        admin_api_keys:
+          type: array
+          items:
+            type: string
+          example: ["super-admin-key-999"]
+          description: "Admin API keys for administrative operations"
+
+    AddServerRequest:
+      type: object
+      required:
+        - backend_name
+        - url
+        - weight
+      properties:
+        backend_name:
+          type: string
+          example: "web-servers"
+        url:
+          type: string
+          format: uri
+          example: "http://localhost:3004"
+        weight:
+          type: integer
+          minimum: 1
+          example: 2
+        max_connections:
+          type: integer
+          minimum: 1
+          example: 150
+        health_check_endpoint:
+          type: string
+          example: "/health"
+
+    UpdateServerRequest:
+      type: object
+      required:
+        - backend_name
+        - old_url
+        - url
+        - weight
+      properties:
+        backend_name:
+          type: string
+          example: "web-servers"
+        old_url:
+          type: string
+          format: uri
+          example: "http://localhost:3004"
+        url:
+          type: string
+          format: uri
+          example: "http://localhost:3005"
+        weight:
+          type: integer
+          minimum: 1
+          example: 3
+        max_connections:
+          type: integer
+          minimum: 1
+          example: 200
+        health_check_endpoint:
+          type: string
+          example: "/status"
+
+    RemoveServerRequest:
+      type: object
+      required:
+        - backend_name
+        - server_url
+      properties:
+        backend_name:
+          type: string
+          example: "web-servers"
+        server_url:
+          type: string
+          format: uri
+          example: "http://localhost:3004"
+
+    ActionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [scaled_up, scaled_down, morning_scaled, evening_scaled]
+          example: "scaled_up"
+
+    TriggerConfig:
+      type: object
+      properties:
+        smart:
+          $ref: '#/components/schemas/SmartTrigger'
+        traffic:
+          $ref: '#/components/schemas/TrafficTrigger'
+        schedule:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScheduleTrigger'
+
+    SmartTrigger:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          example: true
+        evaluation_interval:
+          type: string
+          example: "5s"
+        scale_up_score:
+          type: number
+          format: float
+          example: 0.45
+        scale_down_score:
+          type: number
+          format: float
+          example: 0.15
+
+    TrafficTrigger:
+      type: object
+      properties:
+        high_threshold:
+          type: integer
+          example: 50
+        low_threshold:
+          type: integer
+          example: 5
+        high_action:
+          type: string
+          example: "scale_up"
+        low_action:
+          type: string
+          example: "scale_down"
+
+    ScheduleTrigger:
+      type: object
+      properties:
+        time:
+          type: string
+          pattern: '^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
+          example: "09:00"
+        action:
+          type: string
+          example: "morning_scale"
+
+    ActionConfig:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          example: "http://localhost:8082/actions/scale_up"
+        method:
+          type: string
+          enum: [GET, POST, PUT, DELETE]
+          example: "POST"
+
+tags:
+  - name: Configuration
+    description: Complete proxy configuration management
+  - name: Servers
+    description: Backend server management
+  - name: Actions
+    description: Automatic scaling actions
+  - name: Security
+    description: API key management (admin only)
