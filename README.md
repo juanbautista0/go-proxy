@@ -292,22 +292,83 @@ Access the full API documentation at: **http://localhost:8082/swagger**
 
 ## 🚀 Deployment Guide
 
-### Quick Start
+### Prerequisites
 
+- Go 1.21 or higher
+- Configuration file (`config.yaml`)
+
+### Compilation and Usage
+
+#### 1. Clone and Build
 ```bash
 # Clone repository
 git clone https://github.com/juanbautista0/go-proxy
 cd go-proxy
 
-# Local development
-make run
+# Download dependencies
+go mod download
 
-# Docker deployment
-make docker-compose-up
+# Build binary
+go build -o proxy cmd/main.go
+```
 
-# Production build
-make build
-./bin/proxy
+#### 2. Configuration Setup
+
+Create a `config.yaml` file (required):
+```bash
+# Copy example configuration
+cp config.example.yaml config.yaml
+
+# Edit configuration
+vim config.yaml
+```
+
+#### 3. Running the Proxy
+
+**Default configuration (config.yaml in current directory):**
+```bash
+./proxy
+```
+
+**Custom configuration path:**
+```bash
+./proxy /path/to/your/config.yaml
+```
+
+**With environment variables:**
+```bash
+# Set custom config path
+export CONFIG_PATH="/etc/go-proxy/config.yaml"
+./proxy $CONFIG_PATH
+```
+
+#### 4. Verify Installation
+
+Once started, the proxy exposes three services:
+
+```bash
+# Load balancer (main service)
+curl http://localhost:8080
+
+# Metrics endpoint
+curl http://localhost:8081/metrics
+
+# Configuration API
+curl http://localhost:8082/config
+
+# API documentation
+open http://localhost:8082/swagger
+```
+
+### Quick Start
+
+```bash
+# Complete setup in one go
+git clone https://github.com/juanbautista0/go-proxy
+cd go-proxy
+go build -o proxy cmd/main.go
+cp config.example.yaml config.yaml
+./proxy
 ```
 
 ### Docker Deployment
