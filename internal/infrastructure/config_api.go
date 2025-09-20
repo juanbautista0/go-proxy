@@ -8,11 +8,31 @@ import (
 )
 
 type ConfigAPI struct {
-	configManager *ConfigManager
+	configManager   *ConfigManager
+	loadBalancer    *EnterpriseBalancer
 }
 
 func NewConfigAPI(configManager *ConfigManager) *ConfigAPI {
 	return &ConfigAPI{configManager: configManager}
+}
+
+func (api *ConfigAPI) SetLoadBalancer(lb *EnterpriseBalancer) {
+	api.loadBalancer = lb
+	
+	// Configurar callback para remover servidor de config cuando termine el drenado
+	gracefulManager := NewGracefulConfigManager(api.configManager)
+	lb.serverLifecycle.SetCallbacks(
+		func(serverURL string) {
+			// Remover de memoria (ya configurado)
+			lb.mu.Lock()
+			delete(lb.servers, serverURL)
+			lb.mu.Unlock()
+			
+			// Remover de configuración
+			gracefulManager.RemoveServerFromConfig(serverURL)
+		},
+		nil,
+	)
 }
 
 func (api *ConfigAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +96,10 @@ func (api *ConfigAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api-docs.yaml":
 		swaggerHandler := NewSwaggerHandler()
 		swaggerHandler.ServeHTTP(w, r)
+	case "/servers/draining":
+		api.getDrainingServers(w, r)
+	case "/servers/status":
+		api.getServersStatus(w, r)
 	default:
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
@@ -250,7 +274,7 @@ func (api *ConfigAPI) removeServer(w http.ResponseWriter, r *http.Request) {
 
 	config := *api.configManager.GetConfig()
 	
-	// Buscar backend y remover servidor
+	// Buscar backend y validar servidor
 	for i := range config.Backends {
 		if config.Backends[i].Name == req.BackendName {
 			// Validar límite mínimo
@@ -262,6 +286,18 @@ func (api *ConfigAPI) removeServer(w http.ResponseWriter, r *http.Request) {
 			
 			for j, server := range config.Backends[i].Servers {
 				if server.URL == req.ServerURL {
+					// Iniciar drenado graceful si hay load balancer
+					if api.loadBalancer != nil {
+						if !api.loadBalancer.GracefulRemoveServer(req.ServerURL) {
+							http.Error(w, "Server not found in load balancer", http.StatusNotFound)
+							return
+						}
+						w.WriteHeader(http.StatusAccepted)
+						w.Write([]byte(`{"status":"draining","message":"Server removal initiated, draining connections"}`))
+						return
+					}
+					
+					// Fallback: remoción inmediata si no hay load balancer
 					config.Backends[i].Servers = append(
 						config.Backends[i].Servers[:j],
 						config.Backends[i].Servers[j+1:]...,
@@ -317,4 +353,63 @@ func (api *ConfigAPI) updateServer(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	http.Error(w, "Server not found", http.StatusNotFound)
+}
+
+func (api *ConfigAPI) getDrainingServers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	if api.loadBalancer == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string][]string{"draining_servers": {}})
+		return
+	}
+	
+	drainingServers := api.loadBalancer.GetDrainingServers()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string][]string{"draining_servers": drainingServers})
+}
+
+func (api *ConfigAPI) getServersStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	if api.loadBalancer == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"servers": map[string]interface{}{}})
+		return
+	}
+	
+	serverMetrics := api.loadBalancer.GetServerMetrics()
+	drainingServers := api.loadBalancer.GetDrainingServers()
+	
+	status := make(map[string]interface{})
+	for url, server := range serverMetrics {
+		serverStatus := map[string]interface{}{
+			"active":         server.Active,
+			"healthy":        server.Healthy,
+			"connections":    server.CurrentConns,
+			"total_requests": server.TotalRequests,
+			"failed_requests": server.FailedRequests,
+			"response_time":  server.ResponseTime.String(),
+			"circuit_open":   server.CircuitOpen,
+			"draining":       false,
+		}
+		
+		for _, drainingURL := range drainingServers {
+			if drainingURL == url {
+				serverStatus["draining"] = true
+				break
+			}
+		}
+		
+		status[url] = serverStatus
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"servers": status})
 }

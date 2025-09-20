@@ -95,7 +95,7 @@ func (p *ProxyServiceImpl) UpdateConfig(config *domain.Config) error {
 	// Actualizar servidores en el balanceador
 	if len(config.Backends) > 0 {
 		if eb, ok := p.loadBalancer.(*infrastructure.EnterpriseBalancer); ok {
-			eb.UpdateServers(config.Backends[0].Servers)
+			eb.UpdateServers(config.Backends[0].Servers, &config.Backends[0])
 		}
 	}
 	

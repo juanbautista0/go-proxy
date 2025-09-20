@@ -10,17 +10,25 @@ import (
 )
 
 type MetricsServer struct {
-	proxyService domain.ProxyService
+	proxyService  domain.ProxyService
+	webSocketMetrics *WebSocketMetrics
 }
 
 func NewMetricsServer(proxyService domain.ProxyService) *MetricsServer {
 	return &MetricsServer{
-		proxyService: proxyService,
+		proxyService:     proxyService,
+		webSocketMetrics: NewWebSocketMetrics(proxyService),
 	}
+}
+
+func (ms *MetricsServer) SetLoadBalancer(lb *EnterpriseBalancer) {
+	ms.webSocketMetrics.SetLoadBalancer(lb)
 }
 
 func (ms *MetricsServer) Start(port int) error {
 	http.HandleFunc("/metrics", ms.handleMetrics)
+	http.HandleFunc("/stream", ms.handleStream)
+	http.HandleFunc("/ws", ms.webSocketMetrics.HandleWebSocket)
 	http.HandleFunc("/", ms.handleDashboard)
 
 	addr := fmt.Sprintf(":%d", port)
@@ -94,6 +102,70 @@ func (ms *MetricsServer) formatServerStats(serverStats map[string]*domain.Server
 	return formatted
 }
 
+func (ms *MetricsServer) handleStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			metrics := ms.getMetricsData()
+			data, _ := json.Marshal(metrics)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (ms *MetricsServer) getMetricsData() map[string]interface{} {
+	metrics := ms.proxyService.GetMetrics()
+	serverStats := ms.proxyService.GetServerStats()
+
+	totalRequests := int64(0)
+	activeConnections := int64(0)
+	successfulRequests := int64(0)
+	failedRequests := int64(0)
+
+	for _, server := range serverStats {
+		totalRequests += server.TotalRequests
+		activeConnections += server.CurrentConns
+		successfulRequests += server.TotalRequests - server.FailedRequests
+		failedRequests += server.FailedRequests
+	}
+
+	errorRate := 0.0
+	if totalRequests > 0 {
+		errorRate = float64(failedRequests) / float64(totalRequests) * 100
+	}
+
+	return map[string]interface{}{
+		"timestamp": time.Now(),
+		"metrics": map[string]interface{}{
+			"requests_per_second":   metrics.RequestsPerSecond,
+			"total_requests":        totalRequests,
+			"active_connections":    activeConnections,
+			"successful_requests":   successfulRequests,
+			"failed_requests":       failedRequests,
+			"average_response_time": metrics.AverageResponseTime.String(),
+			"error_rate":            errorRate,
+		},
+		"servers": ms.formatServerStats(serverStats),
+	}
+}
+
 func (ms *MetricsServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	fmt.Fprint(w, `<!DOCTYPE html>
@@ -122,12 +194,15 @@ func (ms *MetricsServer) handleDashboard(w http.ResponseWriter, r *http.Request)
         .healthy { background: #e6fffa; border-color: #38a169; }
         .unhealthy { background: #fed7d7; border-color: #e53e3e; }
         .circuit_open { background: #fefcbf; border-color: #d69e2e; }
+        .draining { background: #fef5e7; border-color: #f56500; }
         .server-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
         .server-url { font-weight: bold; font-size: 1.1em; }
         .server-status { padding: 4px 12px; border-radius: 20px; font-size: 0.8em; font-weight: bold; text-transform: uppercase; }
         .status-healthy { background: #38a169; color: white; }
         .status-unhealthy { background: #e53e3e; color: white; }
         .status-circuit_open { background: #d69e2e; color: white; }
+        .status-draining { background: #f56500; color: white; }
+        .status-draining { background: #f56500; color: white; }
         .server-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; font-size: 0.9em; }
         .stat { text-align: center; padding: 8px; background: rgba(255,255,255,0.7); border-radius: 6px; }
         .stat-label { display: block; font-size: 0.8em; color: #666; margin-bottom: 4px; }
@@ -187,6 +262,10 @@ func (ms *MetricsServer) handleDashboard(w http.ResponseWriter, r *http.Request)
                     <span class="metric-value" id="circuits">0 Open</span>
                 </div>
                 <div class="metric">
+                    <span class="metric-label">Draining Servers</span>
+                    <span class="metric-value warning" id="draining">0</span>
+                </div>
+                <div class="metric">
                     <span class="metric-label">Load Balance</span>
                     <span class="metric-value success">Optimal</span>
                 </div>
@@ -217,10 +296,12 @@ func (ms *MetricsServer) handleDashboard(w http.ResponseWriter, r *http.Request)
             return hours > 0 ? hours + 'h ' + (minutes % 60) + 'm' : minutes + 'm ' + (seconds % 60) + 's';
         }
         
-        function updateStats() {
-            fetch('/metrics')
-                .then(r => r.json())
-                .then(data => {
+        let eventSource;
+        
+        function startStream() {
+            eventSource = new EventSource('/ws');
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
                     document.getElementById('rps').textContent = data.metrics.requests_per_second || 0;
                     document.getElementById('total').textContent = formatNumber(data.metrics.total_requests || 0);
                     document.getElementById('active').textContent = data.metrics.active_connections || 0;
@@ -240,6 +321,7 @@ func (ms *MetricsServer) handleDashboard(w http.ResponseWriter, r *http.Request)
                     serversDiv.innerHTML = '';
                     
                     let circuitCount = 0;
+                    let drainingCount = data.draining_servers ? data.draining_servers.length : 0;
                     
                     for (const [url, server] of Object.entries(data.servers || {})) {
                         if (server.status === 'circuit_open') circuitCount++;
@@ -276,22 +358,29 @@ func (ms *MetricsServer) handleDashboard(w http.ResponseWriter, r *http.Request)
                                     '<span class="stat-label">Weight</span>' +
                                     '<span class="stat-value">' + (server.weight || 1) + '</span>' +
                                 '</div>' +
+                                (server.draining ? 
+                                    '<div class="stat">' +
+                                        '<span class="stat-label">Draining</span>' +
+                                        '<span class="stat-value">🔄 YES</span>' +
+                                    '</div>' : '') +
                             '</div>';
                         
                         serversDiv.appendChild(serverDiv);
                     }
                     
                     document.getElementById('circuits').textContent = circuitCount + ' Open';
+                    document.getElementById('draining').textContent = drainingCount;
                     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
-                })
-                .catch(err => {
-                    console.error('Error fetching metrics:', err);
-                    document.getElementById('lastUpdate').textContent = 'Error loading data';
-                });
+            };
+            
+            eventSource.onerror = function(event) {
+                console.error('Stream error:', event);
+                document.getElementById('lastUpdate').textContent = 'Connection lost - reconnecting...';
+                setTimeout(startStream, 2000);
+            };
         }
         
-        updateStats();
-        setInterval(updateStats, 1000);
+        startStream();
     </script>
 </body>
 </html>`)

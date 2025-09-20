@@ -28,7 +28,7 @@ func main() {
 	// Infraestructura
 	configManager := infrastructure.NewConfigManager(configPath)
 	actionExecutor := infrastructure.NewHTTPActionExecutor()
-	loadBalancer := infrastructure.NewEnterpriseBalancer()
+	enterpriseBalancer := infrastructure.NewEnterpriseBalancer()
 	healthChecker := infrastructure.NewHealthChecker()
 
 	// Cargar configuración inicial
@@ -38,18 +38,12 @@ func main() {
 	}
 
 	// Aplicación
-	proxyService := application.NewProxyService(loadBalancer, healthChecker)
+	proxyService := application.NewProxyService(enterpriseBalancer, healthChecker)
 	
-	// Sistema de triggers inteligente o legacy
-	var triggerService domain.TriggerService
-	if config.Triggers.Smart.Enabled {
-		smartTrigger := application.NewSmartTriggerService(actionExecutor, proxyService)
-		triggerService = application.NewHybridTriggerService(smartTrigger, actionExecutor)
-		log.Println("🧠 Smart Trigger System enabled")
-	} else {
-		triggerService = application.NewTriggerService(actionExecutor)
-		log.Println("⚠️  Legacy Trigger System enabled")
-	}
+	// Sistema de triggers inteligente
+	smartTrigger := application.NewSmartTriggerService(actionExecutor, proxyService)
+	triggerService := application.NewHybridTriggerService(smartTrigger, actionExecutor)
+	log.Println("🧠 Smart Trigger System enabled")
 
 	proxyService.UpdateConfig(config)
 	triggerService.Start(config, proxyService.GetMetrics())
@@ -69,6 +63,7 @@ func main() {
 
 	// Servidor de métricas
 	metricsServer := infrastructure.NewMetricsServer(proxyService)
+	metricsServer.SetLoadBalancer(enterpriseBalancer)
 	go func() {
 		log.Println("Metrics server starting on :8081")
 		if err := metricsServer.Start(8081); err != nil {
@@ -78,6 +73,7 @@ func main() {
 
 	// API de configuración
 	configAPI := infrastructure.NewConfigAPI(configManager)
+	configAPI.SetLoadBalancer(enterpriseBalancer)
 	go func() {
 		log.Println("Config API starting on :8082")
 		http.ListenAndServe(":8082", configAPI)

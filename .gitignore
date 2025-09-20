@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Context memory
+.context_memory.md
+
+# Configuration file (use config.example.yaml as template)
+config.yaml
+
 # Editor/IDE
 # .idea/
 # .vscode/

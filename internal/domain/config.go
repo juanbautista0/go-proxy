@@ -59,6 +59,9 @@ type SmartTrigger struct {
 	StabilityThreshold  float64       `yaml:"stability_threshold"`
 	ScaleUpScore        float64       `yaml:"scale_up_score"`
 	ScaleDownScore      float64       `yaml:"scale_down_score"`
+	LongAvgScaleUpMin   float64       `yaml:"long_avg_scale_up_min"`
+	LongAvgScaleDownMax float64       `yaml:"long_avg_scale_down_max"`
+	TrendThreshold      float64       `yaml:"trend_threshold"`
 }
 
 type TrafficTrigger struct {

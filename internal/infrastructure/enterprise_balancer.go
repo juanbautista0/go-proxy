@@ -19,6 +19,7 @@ type EnterpriseBalancer struct {
 	consistentHashRing    *ConsistentHashRing
 	requestCounter        int64
 	performanceMonitor    *PerformanceMonitor
+	serverLifecycle       *ServerLifecycle
 }
 
 type ServerState struct {
@@ -140,6 +141,7 @@ func NewEnterpriseBalancer() *EnterpriseBalancer {
 		algorithms:         make(map[string]Algorithm),
 		currentAlgorithm:   "adaptive_weighted",
 		consistentHashRing: NewConsistentHashRing(150),
+		serverLifecycle:    NewServerLifecycle(),
 		performanceMonitor: &PerformanceMonitor{
 			globalMetrics: &GlobalMetrics{},
 			alertThresholds: &AlertThresholds{
@@ -164,19 +166,29 @@ func NewEnterpriseBalancer() *EnterpriseBalancer {
 	eb.algorithms["power_of_two"] = &PowerOfTwoChoices{}
 	eb.algorithms["weighted_fair_queue"] = &WeightedFairQueue{}
 
+	// Configurar callbacks del lifecycle
+	eb.serverLifecycle.SetCallbacks(
+		func(serverURL string) {
+			eb.mu.Lock()
+			delete(eb.servers, serverURL)
+			eb.mu.Unlock()
+		},
+		nil,
+	)
+
 	return eb
 }
 
 func (eb *EnterpriseBalancer) SelectServer(backend *domain.Backend, clientIP string) *domain.Server {
 	// Inicializar servidores si es necesario (con write lock)
 	eb.mu.Lock()
-	eb.initializeServers(backend.Servers)
+	eb.initializeServers(backend.Servers, backend)
 	eb.mu.Unlock()
 
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
 
-	// Obtener servidores disponibles
+	// Obtener servidores disponibles (excluyendo los que están drenando)
 	availableServers := eb.getAvailableServers()
 	if len(availableServers) == 0 {
 		return nil
@@ -198,7 +210,7 @@ func (eb *EnterpriseBalancer) SelectServer(backend *domain.Backend, clientIP str
 	return selectedState.Server
 }
 
-func (eb *EnterpriseBalancer) UpdateServers(servers []domain.Server) {
+func (eb *EnterpriseBalancer) UpdateServers(servers []domain.Server, backend *domain.Backend) {
 	// Crear mapa de servidores actuales
 	currentServers := make(map[string]bool)
 	for i := range servers {
@@ -206,7 +218,7 @@ func (eb *EnterpriseBalancer) UpdateServers(servers []domain.Server) {
 		currentServers[server.URL] = true
 		
 		if _, exists := eb.servers[server.URL]; !exists {
-			// Agregar servidor nuevo
+			// Agregar servidor nuevo usando valores del YAML
 			eb.servers[server.URL] = &ServerState{
 				Server: server,
 				Metrics: &ServerMetrics{
@@ -216,11 +228,11 @@ func (eb *EnterpriseBalancer) UpdateServers(servers []domain.Server) {
 				HealthState: Healthy,
 				CircuitBreaker: &CircuitBreaker{
 					State:            CircuitClosed,
-					FailureThreshold: 10,
-					RecoveryTimeout:  30 * time.Second,
+					FailureThreshold: backend.CircuitBreaker.FailureThreshold,
+					RecoveryTimeout:  backend.CircuitBreaker.RecoveryTimeout,
 				},
 				ConnectionPool: &ConnectionPool{
-					MaxConnections: 1000,
+					MaxConnections: eb.calculateDynamicMaxConnections(servers, server),
 				},
 				Weight:          float64(server.Weight),
 				EffectiveWeight: float64(server.Weight),
@@ -231,6 +243,10 @@ func (eb *EnterpriseBalancer) UpdateServers(servers []domain.Server) {
 			eb.servers[server.URL].Server = server
 			eb.servers[server.URL].Weight = float64(server.Weight)
 			eb.servers[server.URL].EffectiveWeight = float64(server.Weight)
+			// Actualizar configuración del circuit breaker y conexiones
+			eb.servers[server.URL].CircuitBreaker.FailureThreshold = backend.CircuitBreaker.FailureThreshold
+			eb.servers[server.URL].CircuitBreaker.RecoveryTimeout = backend.CircuitBreaker.RecoveryTimeout
+			eb.servers[server.URL].ConnectionPool.MaxConnections = eb.calculateDynamicMaxConnections(servers, server)
 		}
 	}
 	
@@ -242,8 +258,8 @@ func (eb *EnterpriseBalancer) UpdateServers(servers []domain.Server) {
 	}
 }
 
-func (eb *EnterpriseBalancer) initializeServers(servers []domain.Server) {
-	eb.UpdateServers(servers)
+func (eb *EnterpriseBalancer) initializeServers(servers []domain.Server, backend *domain.Backend) {
+	eb.UpdateServers(servers, backend)
 }
 
 func (eb *EnterpriseBalancer) getAvailableServers() []*ServerState {
@@ -251,6 +267,11 @@ func (eb *EnterpriseBalancer) getAvailableServers() []*ServerState {
 	now := time.Now()
 
 	for _, state := range eb.servers {
+		// Excluir servidores que están drenando
+		if eb.serverLifecycle.IsServerDraining(state.Server.URL) {
+			continue
+		}
+
 		// Circuit breaker logic
 		if state.CircuitBreaker.State == CircuitOpen {
 			if now.After(state.CircuitBreaker.NextRetryTime) {
@@ -497,4 +518,59 @@ func (eb *EnterpriseBalancer) GetServerMetrics() map[string]*domain.Server {
 		metrics[url] = server
 	}
 	return metrics
+}
+
+func (eb *EnterpriseBalancer) GracefulRemoveServer(serverURL string) bool {
+	eb.mu.RLock()
+	state, exists := eb.servers[serverURL]
+	eb.mu.RUnlock()
+	
+	if !exists {
+		return false
+	}
+	
+	eb.serverLifecycle.StartGracefulRemoval(state.Server, &state.ConnectionPool.ActiveConns)
+	return true
+}
+
+func (eb *EnterpriseBalancer) IsServerDraining(serverURL string) bool {
+	return eb.serverLifecycle.IsServerDraining(serverURL)
+}
+
+func (eb *EnterpriseBalancer) GetDrainingServers() []string {
+	return eb.serverLifecycle.GetDrainingServers()
+}
+
+func (eb *EnterpriseBalancer) calculateDynamicMaxConnections(servers []domain.Server, currentServer *domain.Server) int {
+	// Capacidad base por servidor (configurable)
+	baseCapacity := 1000
+	
+	// Calcular peso total de todos los servidores
+	totalWeight := 0
+	for _, server := range servers {
+		if server.Active {
+			totalWeight += server.Weight
+		}
+	}
+	
+	if totalWeight == 0 {
+		return baseCapacity
+	}
+	
+	// Distribuir capacidad basada en peso del servidor
+	weightRatio := float64(currentServer.Weight) / float64(totalWeight)
+	dynamicCapacity := int(float64(baseCapacity*len(servers)) * weightRatio)
+	
+	// Asegurar mínimo y máximo razonables
+	minConnections := 50
+	maxConnections := 2000
+	
+	if dynamicCapacity < minConnections {
+		return minConnections
+	}
+	if dynamicCapacity > maxConnections {
+		return maxConnections
+	}
+	
+	return dynamicCapacity
 }

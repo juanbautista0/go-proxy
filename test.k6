@@ -1,0 +1,190 @@
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Rate, Trend, Counter } from 'k6/metrics';
+
+// Métricas personalizadas
+const errorRate = new Rate('errors');
+const responseTime = new Trend('response_time');
+const requestCount = new Counter('requests');
+
+// Configuración de escenarios para probar triggers
+export const options = {
+  scenarios: {
+    // Escenario 1: Carga baja para scale_down
+    scale_down_test: {
+      executor: 'constant-vus',
+      vus: 5,
+      duration: '2m',
+      tags: { scenario: 'scale_down' },
+    },
+    
+    // Escenario 2: Carga alta para scale_up
+    scale_up_test: {
+      executor: 'ramping-vus',
+      startVUs: 50,
+      stages: [
+        { duration: '30s', target: 200 },  // Ramp up rápido
+        { duration: '2m', target: 400 },   // Saturación alta
+        { duration: '2m', target: 600 },   // Pico extremo
+        { duration: '1m', target: 800 },   // Máximo stress
+        { duration: '1m', target: 0 },     // Scale down
+      ],
+      tags: { scenario: 'scale_up' },
+      startTime: '3m', // Empieza después del scale_down
+    },
+    
+    // Escenario 3: Stress test para circuit breakers
+    circuit_breaker_test: {
+      executor: 'constant-arrival-rate',
+      rate: 1000, // 1000 RPS
+      timeUnit: '1s',
+      duration: '2m',
+      preAllocatedVUs: 50,
+      maxVUs: 100,
+      tags: { scenario: 'circuit_breaker' },
+      startTime: '8m',
+    },
+  },
+  
+  thresholds: {
+    http_req_duration: ['p(95)<500'], // 95% bajo 500ms
+    http_req_failed: ['rate<0.1'],    // <10% errores
+    errors: ['rate<0.05'],            // <5% errores custom
+  },
+};
+
+const BASE_URL = 'http://localhost:8080';
+const METRICS_URL = 'http://localhost:8081';
+
+export default function () {
+  const scenario = __ENV.K6_SCENARIO || 'default';
+  
+  // Diferentes patrones según escenario
+  switch (scenario) {
+    case 'scale_down':
+      testScaleDown();
+      break;
+    case 'scale_up':
+      testScaleUp();
+      break;
+    case 'circuit_breaker':
+      testCircuitBreaker();
+      break;
+    default:
+      testDefault();
+  }
+}
+
+function testScaleDown() {
+  // Carga muy baja para trigger scale_down
+  const response = http.get(BASE_URL);
+  
+  check(response, {
+    'status is 200': (r) => r.status === 200,
+    'response time < 100ms': (r) => r.timings.duration < 100,
+  });
+  
+  recordMetrics(response);
+  sleep(2); // Pausa larga entre requests
+}
+
+function testScaleUp() {
+  // Carga EXTREMA para trigger scale_up
+  const responses = http.batch([
+    ['GET', BASE_URL],
+    ['GET', BASE_URL],
+    ['GET', BASE_URL],
+    ['GET', BASE_URL],
+    ['GET', BASE_URL + '/health'],
+    ['GET', BASE_URL + '/api/data'],
+    ['GET', BASE_URL + '/status'],
+    ['GET', BASE_URL + '/metrics'],
+  ]);
+  
+  responses.forEach(response => {
+    check(response, {
+      'status is 200': (r) => r.status === 200,
+      'response time < 2000ms': (r) => r.timings.duration < 2000,
+    });
+    recordMetrics(response);
+  });
+  
+  // Sin sleep = máxima presión
+}
+
+function testCircuitBreaker() {
+  // Requests muy rápidos para abrir circuit breakers
+  const response = http.get(BASE_URL, {
+    timeout: '5s',
+  });
+  
+  check(response, {
+    'status is not 500': (r) => r.status !== 500,
+    'circuit breaker working': (r) => r.status === 503 || r.status === 200,
+  });
+  
+  recordMetrics(response);
+  // Sin sleep para máxima presión
+}
+
+function testDefault() {
+  // Test balanceado
+  const response = http.get(BASE_URL);
+  
+  check(response, {
+    'status is 200': (r) => r.status === 200,
+    'response time < 500ms': (r) => r.timings.duration < 500,
+  });
+  
+  recordMetrics(response);
+  sleep(1);
+}
+
+function recordMetrics(response) {
+  requestCount.add(1);
+  responseTime.add(response.timings.duration);
+  errorRate.add(response.status !== 200);
+}
+
+// Setup para monitorear métricas del balanceador
+export function setup() {
+  console.log('🚀 Starting Go-Proxy Load Test');
+  console.log('📊 Monitor metrics at: http://localhost:8081');
+  console.log('🔧 Config API at: http://localhost:8082');
+  
+  // Verificar que el balanceador esté corriendo
+  const healthCheck = http.get(METRICS_URL + '/health');
+  if (healthCheck.status !== 200) {
+    console.error('❌ Go-Proxy not running on localhost:8080');
+  }
+  
+  return { startTime: new Date() };
+}
+
+// Teardown para mostrar resumen
+export function teardown(data) {
+  console.log('✅ Load test completed');
+  console.log(`⏱️  Duration: ${(new Date() - data.startTime) / 1000}s`);
+  console.log('📈 Check metrics dashboard for trigger events');
+}
+
+// Función para ejecutar escenarios específicos
+export function handleSummary(data) {
+  return {
+    'summary.json': JSON.stringify(data, null, 2),
+    stdout: `
+🎯 GO-PROXY LOAD TEST RESULTS
+=============================
+📊 Requests: ${data.metrics.http_reqs.values.count}
+⚡ RPS: ${data.metrics.http_reqs.values.rate.toFixed(2)}
+🕐 Avg Response: ${data.metrics.http_req_duration.values.avg.toFixed(2)}ms
+📈 P95 Response: ${data.metrics.http_req_duration.values['p(95)'].toFixed(2)}ms
+❌ Error Rate: ${(data.metrics.http_req_failed.values.rate * 100).toFixed(2)}%
+
+🔍 Check Go-Proxy logs for trigger events:
+   - Scale Up triggers at >0.75 score
+   - Scale Down triggers at <0.35 score
+   - Circuit breakers at 3+ failures
+    `,
+  };
+}

@@ -63,7 +63,7 @@ actions:
         method: POST
 security:
     api_keys:
-        - prod-api-key-2024-secure-token-abc123
-        - backup-api-key-2024-secure-token-def456
+        - "your-api-key-here"
+        - "backup-api-key-here"
     admin_api_keys:
-        - admin-super-secure-key-2024-xyz789
+        - "your-admin-key-here"

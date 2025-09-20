@@ -30,6 +30,7 @@ func (h *HybridTriggerService) Start(config *domain.Config, metrics *domain.Traf
 
 	// Configurar SmartTrigger con parámetros del config
 	h.configureSmartTrigger(config)
+	h.smartTrigger.SetConfig(config)
 
 	// Iniciar monitoreo inteligente
 	go h.smartMonitorLoop()
@@ -92,16 +93,22 @@ func (h *HybridTriggerService) evaluateAndExecute() {
 	decision := h.smartTrigger.EvaluateTrigger()
 
 	// Log detallado de componentes del score
-	log.Printf("📊 Score Components: RPS=%.3f, Latency=%.3f, Error=%.3f, Conn=%.3f, Total=%.3f",
+	log.Printf("📊 Score Components: RPS=%.6f, Latency=%.6f, Error=%.6f, Conn=%.6f, Total=%.6f",
 		scoreDetail.RPSScore, scoreDetail.LatencyScore, scoreDetail.ErrorScore, scoreDetail.ConnScore, scoreDetail.TotalScore)
 
 	// Log de decisión para debugging
-	log.Printf("🔍 Smart Decision: Action=%s, Score=%.3f, Trend=%s, Stability=%.3f, Confidence=%.3f, CanTrigger=%v",
+	log.Printf("🔍 Smart Decision: Action=%s, Score=%.6f, Trend=%s, Stability=%.6f, Confidence=%.6f, CanTrigger=%v",
 		decision.Action, decision.Score, decision.Trend, decision.Stability, decision.Confidence, decision.CanTrigger)
 
 	// Log de thresholds para comparación
-	log.Printf("⚖️  Thresholds: ScaleUp=%.3f, ScaleDown=%.3f, StabilityMin=0.6",
-		h.smartTrigger.thresholds.ScaleUp, h.smartTrigger.thresholds.ScaleDown)
+	log.Printf("⚖️  Thresholds: ScaleUp=%.6f, ScaleDown=%.6f, StabilityMin=%.6f",
+		h.config.Triggers.Smart.ScaleUpScore, h.config.Triggers.Smart.ScaleDownScore, h.config.Triggers.Smart.StabilityThreshold)
+
+	// Log adicional para debugging
+	shortAvg := h.smartTrigger.shortWindow.GetAverage()
+	longAvg := h.smartTrigger.longWindow.GetAverage()
+	log.Printf("🔧 Debug: shortAvg=%.6f, longAvg=%.6f, cooldownRemaining=%.1fs",
+		shortAvg, longAvg, h.smartTrigger.cooldownPeriod.Seconds()-time.Since(h.smartTrigger.lastTrigger).Seconds())
 
 	// Ejecutar acción si es necesario
 	if decision.Action != "none" && decision.CanTrigger {
@@ -118,9 +125,19 @@ func (h *HybridTriggerService) executeSmartAction(decision *TriggerDecision) {
 
 	switch decision.Action {
 	case "scale_up":
+		// VALIDACIÓN CRÍTICA: Verificar max_servers antes de scale_up
+		if !h.canScaleUp() {
+			// Scale up blocked: Already at maximum servers
+			return
+		}
 		actionName = h.config.Triggers.Traffic.HighAction
 		emoji = "🚀"
 	case "scale_down":
+		// VALIDACIÓN CRÍTICA: Verificar min_servers antes de scale_down
+		if !h.canScaleDown() {
+			//Scale down blocked: Already at minimum servers
+			return
+		}
 		actionName = h.config.Triggers.Traffic.LowAction
 		emoji = "📉"
 	default:
@@ -148,6 +165,60 @@ func (h *HybridTriggerService) executeSmartAction(decision *TriggerDecision) {
 	// Log exitoso
 	log.Printf("%s SMART TRIGGER: %s executed (Score: %.3f, Confidence: %.3f, Reason: %s)",
 		emoji, actionName, decision.Score, decision.Confidence, decision.Reason)
+}
+
+// canScaleUp - Valida si se puede hacer scale up basado en max_servers
+func (h *HybridTriggerService) canScaleUp() bool {
+	// Obtener servidores activos actuales
+	serverStats := h.smartTrigger.proxyService.GetServerStats()
+	activeServers := 0
+
+	for _, server := range serverStats {
+		if server.Healthy && server.Active {
+			activeServers++
+		}
+	}
+
+	// Obtener max_servers de la configuración
+	maxServers := 10 // Default de seguridad para evitar escalado infinito
+	if len(h.config.Backends) > 0 {
+		if h.config.Backends[0].MaxServers > 0 {
+			maxServers = h.config.Backends[0].MaxServers
+		}
+	}
+
+	log.Printf("📊 Server Count Check: Active=%d, Max=%d, CanScaleUp=%v",
+		activeServers, maxServers, activeServers < maxServers)
+
+	// Solo permitir scale up si tenemos menos servidores que el máximo
+	return activeServers < maxServers
+}
+
+// canScaleDown - Valida si se puede hacer scale down basado en min_servers
+func (h *HybridTriggerService) canScaleDown() bool {
+	// Obtener servidores activos actuales
+	serverStats := h.smartTrigger.proxyService.GetServerStats()
+	activeServers := 0
+
+	for _, server := range serverStats {
+		if server.Healthy && server.Active {
+			activeServers++
+		}
+	}
+
+	// Obtener min_servers de la configuración
+	minServers := 1 // Default de seguridad para evitar outages
+	if len(h.config.Backends) > 0 {
+		if h.config.Backends[0].MinServers > 0 {
+			minServers = h.config.Backends[0].MinServers
+		}
+	}
+
+	log.Printf("📊 Server Count Check: Active=%d, Min=%d, CanScaleDown=%v",
+		activeServers, minServers, activeServers > minServers)
+
+	// Solo permitir scale down si tenemos más servidores que el mínimo
+	return activeServers > minServers
 }
 
 // max - Función helper para obtener el máximo de dos enteros

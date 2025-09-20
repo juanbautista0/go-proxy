@@ -39,6 +39,9 @@ Thumbs.db
 tmp/
 temp/
 
+# Context memory
+.context_memory.md
+
 # Example/auxiliary files
 backend*.go
 mock_actions.go
