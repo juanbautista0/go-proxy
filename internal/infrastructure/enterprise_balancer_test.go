@@ -61,7 +61,13 @@ func TestEnterpriseBalancer_UpdateServers(t *testing.T) {
 		{URL: "http://localhost:3002", Weight: 2, Active: true},
 	}
 	
-	balancer.UpdateServers(servers1)
+	backend := &domain.Backend{
+		CircuitBreaker: domain.CircuitBreakerCfg{
+			FailureThreshold: 5,
+			RecoveryTimeout: 30 * time.Second,
+		},
+	}
+	balancer.UpdateServers(servers1, backend)
 	
 	if len(balancer.servers) != 2 {
 		t.Errorf("expected 2 servers, got %d", len(balancer.servers))
@@ -74,7 +80,7 @@ func TestEnterpriseBalancer_UpdateServers(t *testing.T) {
 		// 3002 removed
 	}
 	
-	balancer.UpdateServers(servers2)
+	balancer.UpdateServers(servers2, backend)
 	
 	if len(balancer.servers) != 2 {
 		t.Errorf("expected 2 servers after update, got %d", len(balancer.servers))
@@ -106,7 +112,13 @@ func TestEnterpriseBalancer_UpdateStats(t *testing.T) {
 	}
 	
 	servers := []domain.Server{*server}
-	balancer.UpdateServers(servers)
+	backend := &domain.Backend{
+		CircuitBreaker: domain.CircuitBreakerCfg{
+			FailureThreshold: 5,
+			RecoveryTimeout: 30 * time.Second,
+		},
+	}
+	balancer.UpdateServers(servers, backend)
 
 	// Test successful request
 	balancer.UpdateStats(server, 100*time.Millisecond, true)
@@ -142,7 +154,13 @@ func TestEnterpriseBalancer_CircuitBreaker(t *testing.T) {
 	}
 	
 	servers := []domain.Server{*server}
-	balancer.UpdateServers(servers)
+	backend := &domain.Backend{
+		CircuitBreaker: domain.CircuitBreakerCfg{
+			FailureThreshold: 5,
+			RecoveryTimeout: 30 * time.Second,
+		},
+	}
+	balancer.UpdateServers(servers, backend)
 
 	state := balancer.servers[server.URL]
 	
@@ -156,11 +174,11 @@ func TestEnterpriseBalancer_CircuitBreaker(t *testing.T) {
 	}
 
 	// Test that server is not available when circuit is open
-	backend := &domain.Backend{
+	testBackend := &domain.Backend{
 		Servers: []domain.Server{*server},
 	}
 	
-	selectedServer := balancer.SelectServer(backend, "192.168.1.1")
+	selectedServer := balancer.SelectServer(testBackend, "192.168.1.1")
 	if selectedServer != nil {
 		t.Error("expected no server when circuit breaker is open")
 	}
@@ -174,7 +192,13 @@ func TestEnterpriseBalancer_GetServerMetrics(t *testing.T) {
 		{URL: "http://localhost:3002", Weight: 2, Active: true},
 	}
 	
-	balancer.UpdateServers(servers)
+	backend := &domain.Backend{
+		CircuitBreaker: domain.CircuitBreakerCfg{
+			FailureThreshold: 5,
+			RecoveryTimeout: 30 * time.Second,
+		},
+	}
+	balancer.UpdateServers(servers, backend)
 
 	// Add some stats
 	balancer.UpdateStats(&servers[0], 100*time.Millisecond, true)
@@ -212,7 +236,13 @@ func TestEnterpriseBalancer_HealthStateTransitions(t *testing.T) {
 	}
 	
 	servers := []domain.Server{*server}
-	balancer.UpdateServers(servers)
+	backend := &domain.Backend{
+		CircuitBreaker: domain.CircuitBreakerCfg{
+			FailureThreshold: 5,
+			RecoveryTimeout: 30 * time.Second,
+		},
+	}
+	balancer.UpdateServers(servers, backend)
 
 	state := balancer.servers[server.URL]
 	

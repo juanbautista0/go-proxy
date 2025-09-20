@@ -16,14 +16,20 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.21'
+        go-version: '1.22'
+        cache: false
+    
+    - name: Run tests
+      run: |
+        go mod download
+        go test ./internal/... ./cmd/... -v
     
     - name: Build and push binary
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       env:
         GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
       run: |
-        VERSION=$(date +"%Y%m%d.%H%M")
+        VERSION=$(date +"%Y%m%d%H%M")
         
         go mod download
         

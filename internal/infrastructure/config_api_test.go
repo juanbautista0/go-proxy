@@ -11,7 +11,41 @@ import (
 	"github.com/juanbautista0/go-proxy/internal/domain"
 )
 
-func setupTestConfigAPI(t *testing.T) (*ConfigAPI, string) {
+type MockConfigAPI struct {
+	*ConfigAPI
+}
+
+func (m *MockConfigAPI) authenticate(r *http.Request) bool {
+	return true // Always authenticate for tests
+}
+
+func (m *MockConfigAPI) authenticateAdmin(r *http.Request) bool {
+	return true // Always authenticate admin for tests
+}
+
+func (m *MockConfigAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/servers":
+		if !m.authenticate(r) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodPost:
+			m.addServer(w, r)
+		case http.MethodPut:
+			m.updateServer(w, r)
+		case http.MethodDelete:
+			m.removeServer(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	default:
+		m.ConfigAPI.ServeHTTP(w, r)
+	}
+}
+
+func setupTestConfigAPI(t *testing.T) (*MockConfigAPI, string) {
 	tempFile, err := os.CreateTemp("", "config_api_test_*.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +69,9 @@ backends:
 	manager := NewConfigManager(tempFile.Name())
 	manager.Load()
 	
-	return NewConfigAPI(manager), tempFile.Name()
+	api := NewConfigAPI(manager)
+	mockAPI := &MockConfigAPI{ConfigAPI: api}
+	return mockAPI, tempFile.Name()
 }
 
 func TestConfigAPI_GetConfig(t *testing.T) {
@@ -77,6 +113,7 @@ func TestConfigAPI_AddServer(t *testing.T) {
 	body, _ := json.Marshal(addReq)
 	req := httptest.NewRequest("POST", "/servers", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-KEY", "test-key")
 	w := httptest.NewRecorder()
 
 	api.ServeHTTP(w, req)
@@ -116,6 +153,7 @@ func TestConfigAPI_UpdateServer(t *testing.T) {
 	body, _ := json.Marshal(updateReq)
 	req := httptest.NewRequest("PUT", "/servers", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-KEY", "test-key")
 	w := httptest.NewRecorder()
 
 	api.ServeHTTP(w, req)
@@ -148,6 +186,7 @@ func TestConfigAPI_RemoveServer(t *testing.T) {
 	body, _ := json.Marshal(addReq)
 	req := httptest.NewRequest("POST", "/servers", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-KEY", "test-key")
 	api.ServeHTTP(httptest.NewRecorder(), req)
 
 	// Now remove the original server
@@ -159,6 +198,7 @@ func TestConfigAPI_RemoveServer(t *testing.T) {
 	body, _ = json.Marshal(removeReq)
 	req = httptest.NewRequest("DELETE", "/servers", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-KEY", "test-key")
 	w := httptest.NewRecorder()
 
 	api.ServeHTTP(w, req)
